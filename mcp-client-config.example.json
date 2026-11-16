@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "/absolute/path/to/whatsapp-mcp",
+      "args": [
+        "mcp",
+        "--data-dir",
+        "/absolute/private/whatsapp-data"
+      ]
+    }
+  }
+}

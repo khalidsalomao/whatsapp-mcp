@@ -1,0 +1,9 @@
+/bin/
+*.db
+*.db-*
+*.sock
+*.lock
+pairing.png
+mcp-http.token
+/outgoing/
+.DS_Store
