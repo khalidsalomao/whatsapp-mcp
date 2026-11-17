@@ -23,9 +23,31 @@ make build
 
 One service owns the WhatsApp connection and SQLite databases. Independent MCP
 stdio clients share it over a private Unix socket. Optional `mcp-http` mode
-provides an authenticated loopback MCP endpoint. No TCP listener or public URL
-is enabled automatically. The server does not require a model API key or run
-model inference. A host that invokes a model manages that separately.
+provides an authenticated loopback MCP endpoint. The `start` command starts both
+the service and HTTP endpoint and prints the local URL. The server does not
+require a model API key or run model inference. A host that invokes a model
+manages that separately.
+
+## Run locally
+
+Run the compiled executable from your project directory:
+
+```sh
+./bin/whatsapp-mcp start
+```
+
+It creates or reuses the private HTTP token, starts the WhatsApp service if
+needed, and prints `http://127.0.0.1:8765/mcp` once the local service is available.
+Use `Authorization: Bearer <token>` with the token from the printed file path.
+The command stays in the foreground. `Ctrl+C` stops the HTTP endpoint and a
+service started by this command. A service that was already running retains its
+own lifecycle. Shutdown allows active HTTP requests up to five seconds to finish.
+
+The saved WhatsApp pairing is reused on restart. For first-time pairing, use
+the complete command printed by `start` in another terminal. This command
+includes the data directory used by the running service. `start` accepts `--data-dir`,
+`--listen`, and an optional existing `--token-file`. A remote client needs a
+reachable HTTPS route to this local endpoint.
 
 ## Tools
 
@@ -271,7 +293,8 @@ HTTPS route to the MCP endpoint for discovery, subscriptions, and tool calls.
 The local daemon then delivers signed outbound HTTPS callbacks. No public
 endpoint or live subscription is created by the default installer.
 
-To prepare the optional local HTTP endpoint:
+The `start` command prepares the local HTTP endpoint automatically. To manage
+that endpoint separately from an existing service:
 
 ```sh
 APP="$HOME/Library/Application Support/WhatsAppMCP"
@@ -373,7 +396,8 @@ Only the last command requires the Codex CLI or modifies its configuration.
 Existing unrelated entries are preserved. Re-running an installation retains
 the account databases. Build/test commands never invoke the installer.
 
-To run from the project directory on macOS, start `./bin/whatsapp-mcp serve`.
+To run from the project directory on macOS, start `./bin/whatsapp-mcp start`.
+The `serve` command runs the WhatsApp service on its own for stdio clients.
 For first-time pairing, run `./bin/whatsapp-mcp pair --open` in a second terminal
 or double-click `Pair WhatsApp.command` in the project folder. Scan the QR with
 WhatsApp → Linked Devices → Link a Device. The service keeps the linked session

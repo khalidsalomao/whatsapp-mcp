@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -156,15 +157,23 @@ func authenticatedMCP(c *localClient, token string) http.Handler {
 	})
 }
 
-func runMCPHTTP(ctx context.Context, dir, address, tokenPath string) error {
+func listenMCPHTTP(address string) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return errors.New("listen address must be an explicit loopback IP and port")
+		return nil, errors.New("listen address must be an explicit loopback IP and port")
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil || !ip.IsLoopback() {
-		return errors.New("HTTP MCP must bind to loopback; use an authenticated HTTPS proxy for remote access")
+		return nil, errors.New("HTTP MCP must bind to loopback; use an authenticated HTTPS proxy for remote access")
 	}
+	listener, err := net.Listen("tcp", address)
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("MCP address %s is already in use; stop the other listener or choose a different --listen address: %w", address, err)
+	}
+	return listener, err
+}
+
+func runMCPHTTP(ctx context.Context, dir, address, tokenPath string) error {
 	if tokenPath == "" {
 		return errors.New("--token-file is required; run events-init to create a private token")
 	}
@@ -172,30 +181,18 @@ func runMCPHTTP(ctx context.Context, dir, address, tokenPath string) error {
 	if err != nil {
 		return err
 	}
-	c := newLocalClient(dir)
-	defer c.http.CloseIdleConnections()
-	l, err := net.Listen("tcp", address)
+	l, err := listenMCPHTTP(address)
 	if err != nil {
 		return err
 	}
 	defer l.Close()
+	return serveMCPHTTP(ctx, dir, l, token)
+}
+
+func serveMCPHTTP(ctx context.Context, dir string, l net.Listener, token string) error {
+	c := newLocalClient(dir)
+	defer c.http.CloseIdleConnections()
 	s := &http.Server{Handler: authenticatedMCP(c, token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: mediaRequestTimeout + 10*time.Second, IdleTimeout: 60 * time.Second}
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-stop:
-			return
-		}
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.Shutdown(shutdown)
-	}()
-	fmt.Fprintln(os.Stderr, "Authenticated MCP HTTP endpoint:", l.Addr().String()+"/mcp")
-	err = s.Serve(l)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
+	fmt.Fprintln(os.Stderr, "Authenticated MCP HTTP endpoint:", "http://"+l.Addr().String()+"/mcp")
+	return serveHTTP(ctx, s, l)
 }

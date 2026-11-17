@@ -29,7 +29,24 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Println("whatsapp-mcp " + version + "\nCommands: serve, mcp, mcp-http, events-init, call, pair, status, logout, version\nOptions (after command): --data-dir PATH; pair also accepts --open\ncall: --tool NAME, with one JSON object on stdin; returns JSON on stdout\nmcp-http: --listen 127.0.0.1:8765 --token-file PATH\nevents-init creates a private HTTP MCP token; it does not expose a network endpoint.\nDefault data directory: ~/Library/Application Support/WhatsAppMCP on macOS\nPairing and logout are local CLI commands, never MCP tools.")
+		fmt.Printf(`whatsapp-mcp %s
+
+Usage: whatsapp-mcp <command> [options]
+
+  start        Start WhatsApp and local HTTP MCP, prepare authentication, print URL
+  pair --open  Show the QR code for first-time pairing
+  status       Show the WhatsApp connection status
+  logout       Unlink this device
+  serve        Run the WhatsApp service for separate MCP clients
+  mcp          Run the stdio MCP endpoint
+  mcp-http     Run an HTTP MCP adapter using --token-file PATH
+  events-init  Create or reuse the private HTTP authentication token
+  call         Call --tool NAME with one JSON object on stdin
+  version      Print the version
+
+Use <command> --help for options, and --data-dir PATH to select an account directory.
+Default data directory on macOS: ~/Library/Application Support/WhatsAppMCP
+`, version)
 		return nil
 	}
 	if args[0] == "version" {
@@ -42,11 +59,21 @@ func run(args []string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	dir := fs.String("data-dir", filepath.Join(config, "WhatsAppMCP"), "private account data directory")
-	openImage := fs.Bool("open", false, "open a pairing QR image locally")
-	listen := fs.String("listen", "127.0.0.1:8765", "loopback HTTP MCP listen address")
-	tokenFile := fs.String("token-file", "", "private file containing the HTTP MCP bearer token")
-	toolName := fs.String("tool", "", "tool name for call; parameters are read from stdin")
+	var openImage bool
+	var listen, tokenFile, toolName string
+	switch args[0] {
+	case "start", "mcp-http":
+		fs.StringVar(&listen, "listen", "127.0.0.1:8765", "loopback HTTP MCP listen address")
+		fs.StringVar(&tokenFile, "token-file", "", "existing private bearer token file (start creates a default token when omitted)")
+	case "pair":
+		fs.BoolVar(&openImage, "open", false, "open the pairing QR image locally")
+	case "call":
+		fs.StringVar(&toolName, "tool", "", "tool name; parameters are read from stdin")
+	}
 	if err = fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -59,20 +86,22 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
+	case "start":
+		return runStart(ctx, *dir, listen, tokenFile)
 	case "serve":
 		return runService(ctx, *dir)
 	case "mcp":
 		return runMCP(ctx, *dir)
 	case "mcp-http":
-		return runMCPHTTP(ctx, *dir, *listen, *tokenFile)
+		return runMCPHTTP(ctx, *dir, listen, tokenFile)
 	case "events-init":
 		return initMCPToken(*dir)
 	case "pair":
-		return runPair(ctx, *dir, *openImage)
+		return runPair(ctx, *dir, openImage)
 	case "call":
 		c := newLocalClient(*dir)
 		defer c.http.CloseIdleConnections()
-		return callLocalTool(ctx, c, *toolName, os.Stdin, os.Stdout)
+		return callLocalTool(ctx, c, toolName, os.Stdin, os.Stdout)
 	case "status", "logout":
 		c := newLocalClient(*dir)
 		defer c.http.CloseIdleConnections()
