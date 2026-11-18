@@ -5,5 +5,8 @@
 *.lock
 pairing.png
 mcp-http.token
+.mcp-http.token-*
+cloudflare-tunnel.json
+.cloudflare-tunnel.json-*
 /outgoing/
 .DS_Store

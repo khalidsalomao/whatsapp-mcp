@@ -16,12 +16,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const startTestArgs = "WHATSAPP_MCP_TEST_START_ARGS"
+const cliTestArgs = "WHATSAPP_MCP_TEST_CLI_ARGS"
 
 // Each child runs the real command with a temporary account. Unpaired services
 // never dial WhatsApp, and the reuse case uses an existing synthetic service.
 func TestStartCommand(t *testing.T) {
-	if input := os.Getenv(startTestArgs); input != "" {
+	if input := os.Getenv(cliTestArgs); input != "" {
+		if addr := os.Getenv("WHATSAPP_MCP_TEST_PUBLIC_ADDR"); addr != "" {
+			mcpProbeClient.Transport = publicTestTransport(t, addr, os.Getenv("WHATSAPP_MCP_TEST_PUBLIC_CERT"))
+		}
 		var args []string
 		if err := json.Unmarshal([]byte(input), &args); err != nil {
 			t.Fatal(err)
@@ -29,7 +32,7 @@ func TestStartCommand(t *testing.T) {
 		if err := run(args); err != nil {
 			t.Fatal(err)
 		}
-		return
+		os.Exit(0)
 	}
 
 	t.Run("help succeeds and shows relevant options", func(t *testing.T) {
@@ -145,6 +148,11 @@ func TestStartCommand(t *testing.T) {
 func startTestCommand(t *testing.T, dir string, extra ...string) *exec.Cmd {
 	t.Helper()
 	args := append([]string{"start", "--data-dir", dir, "--listen", "127.0.0.1:0"}, extra...)
+	return testCLICommand(t, args...)
+}
+
+func testCLICommand(t *testing.T, args ...string) *exec.Cmd {
+	t.Helper()
 	input, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
@@ -152,13 +160,21 @@ func startTestCommand(t *testing.T, dir string, extra ...string) *exec.Cmd {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartCommand$")
-	cmd.Env = append(os.Environ(), startTestArgs+"="+string(input))
+	cmd.Env = append(os.Environ(), cliTestArgs+"="+string(input))
 	return cmd
 }
 
 func startCommandForTest(t *testing.T, dir string, extra ...string) (string, func()) {
 	t.Helper()
-	cmd := startTestCommand(t, dir, extra...)
+	endpoint, stop := waitForStartURL(t, startTestCommand(t, dir, extra...), "Authenticated MCP HTTP endpoint: ")
+	if !strings.HasPrefix(endpoint, "http://127.0.0.1:") || !strings.HasSuffix(endpoint, "/mcp") {
+		t.Fatalf("incomplete endpoint URL %q", endpoint)
+	}
+	return endpoint, stop
+}
+
+func waitForStartURL(t *testing.T, cmd *exec.Cmd, label string) (string, func()) {
+	t.Helper()
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +192,7 @@ func startCommandForTest(t *testing.T, dir string, extra ...string) (string, fun
 		for scanner.Scan() {
 			line := scanner.Text()
 			lines = append(lines, line)
-			if endpoint, ok := strings.CutPrefix(line, "Authenticated MCP HTTP endpoint: "); ok {
+			if endpoint, ok := strings.CutPrefix(line, label); ok {
 				ready <- endpoint
 			}
 		}
@@ -200,9 +216,6 @@ func startCommandForTest(t *testing.T, dir string, extra ...string) (string, fun
 	}
 	select {
 	case endpoint := <-ready:
-		if !strings.HasPrefix(endpoint, "http://127.0.0.1:") || !strings.HasSuffix(endpoint, "/mcp") {
-			t.Fatalf("incomplete endpoint URL %q", endpoint)
-		}
 		return endpoint, stop
 	case <-done:
 		t.Fatalf("start exited before its endpoint was ready: %v\n%s", processErr, strings.Join(lines, "\n"))
@@ -214,7 +227,12 @@ func startCommandForTest(t *testing.T, dir string, extra ...string) (string, fun
 
 func startEndpointStatus(t *testing.T, endpoint, token string) status {
 	t.Helper()
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	return authenticatedStatusForTest(t, endpoint, token, http.DefaultTransport)
+}
+
+func authenticatedStatusForTest(t *testing.T, endpoint, token string, transport http.RoundTripper) status {
+	t.Helper()
+	httpClient := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	response, err := httpClient.Get(endpoint)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +244,7 @@ func startEndpointStatus(t *testing.T, endpoint, token string) status {
 	httpClient.Transport = eventRoundTripper(func(r *http.Request) (*http.Response, error) {
 		req := r.Clone(r.Context())
 		req.Header.Set("Authorization", "Bearer "+token)
-		return http.DefaultTransport.RoundTrip(req)
+		return transport.RoundTrip(req)
 	})
 	client := mcp.NewClient(&mcp.Implementation{Name: "start-test", Version: "1"}, nil)
 	session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: httpClient, DisableStandaloneSSE: true}, nil)

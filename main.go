@@ -33,9 +33,10 @@ func run(args []string) error {
 
 Usage: whatsapp-mcp <command> [options]
 
-  start        Start WhatsApp and local HTTP MCP, prepare authentication, print URL
+  setup        Set up WhatsApp pairing and an optional named Cloudflare Tunnel
+  start        Start WhatsApp, MCP Events, HTTP MCP, and any configured tunnel
   pair --open  Show the QR code for first-time pairing
-  status       Show the WhatsApp connection status
+  status       Show WhatsApp status and check the local and public MCP URLs
   logout       Unlink this device
   serve        Run the WhatsApp service for separate MCP clients
   mcp          Run the stdio MCP endpoint
@@ -60,11 +61,21 @@ Default data directory on macOS: ~/Library/Application Support/WhatsAppMCP
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	dir := fs.String("data-dir", filepath.Join(config, "WhatsAppMCP"), "private account data directory")
 	var openImage bool
+	var localOnly bool
+	var setup setupOptions
 	var listen, tokenFile, toolName string
 	switch args[0] {
-	case "start", "mcp-http":
-		fs.StringVar(&listen, "listen", "127.0.0.1:8765", "loopback HTTP MCP listen address")
+	case "start", "status", "mcp-http":
+		fs.StringVar(&listen, "listen", defaultMCPListen, "loopback HTTP MCP address")
 		fs.StringVar(&tokenFile, "token-file", "", "existing private bearer token file (start creates a default token when omitted)")
+		if args[0] == "start" {
+			fs.BoolVar(&localOnly, "local", false, "start without the configured Cloudflare Tunnel")
+		}
+	case "setup":
+		fs.BoolVar(&setup.pair, "pair", false, "pair WhatsApp, reusing an existing session")
+		fs.StringVar(&setup.tunnelURL, "tunnel-url", "", "stable HTTPS URL of a named Cloudflare Tunnel")
+		fs.StringVar(&setup.tunnelTokenFile, "tunnel-token-file", "", "private file containing the Cloudflare Tunnel token")
+		fs.BoolVar(&setup.removeTunnel, "remove-tunnel", false, "remove the saved tunnel settings for future starts")
 	case "pair":
 		fs.BoolVar(&openImage, "open", false, "open the pairing QR image locally")
 	case "call":
@@ -86,8 +97,10 @@ Default data directory on macOS: ~/Library/Application Support/WhatsAppMCP
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
+	case "setup":
+		return runSetup(ctx, *dir, setup)
 	case "start":
-		return runStart(ctx, *dir, listen, tokenFile)
+		return runStart(ctx, *dir, listen, tokenFile, localOnly)
 	case "serve":
 		return runService(ctx, *dir)
 	case "mcp":
@@ -102,15 +115,13 @@ Default data directory on macOS: ~/Library/Application Support/WhatsAppMCP
 		c := newLocalClient(*dir)
 		defer c.http.CloseIdleConnections()
 		return callLocalTool(ctx, c, toolName, os.Stdin, os.Stdout)
-	case "status", "logout":
+	case "status":
+		return runStatus(ctx, *dir, listen, tokenFile)
+	case "logout":
 		c := newLocalClient(*dir)
 		defer c.http.CloseIdleConnections()
-		method, path := "GET", "/status"
-		if args[0] == "logout" {
-			method, path = "POST", "/logout"
-		}
 		var out any
-		if err = c.call(ctx, method, path, nil, &out); err != nil {
+		if err = c.call(ctx, "POST", "/logout", nil, &out); err != nil {
 			return err
 		}
 		enc := json.NewEncoder(os.Stdout)
@@ -177,8 +188,8 @@ func runPair(ctx context.Context, dir string, openImage bool) error {
 			}
 			fmt.Fprintln(os.Stderr, "Scan with WhatsApp → Settings → Linked Devices → Link a Device. QR image:", path)
 			if openImage {
-				if err = exec.Command("open", path).Run(); err != nil {
-					return errors.New("could not open QR image; open pairing.png manually")
+				if err = exec.CommandContext(ctx, "open", path).Run(); err != nil {
+					fmt.Fprintln(os.Stderr, "Could not open the QR image automatically. Open the path shown above.")
 				}
 			}
 		case "success":

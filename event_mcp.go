@@ -20,6 +20,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	defaultMCPListen = "127.0.0.1:8765"
+	mcpTokenFilename = "mcp-http.token"
+	mcpHTTPPath      = "/mcp"
+	mcpAuthChallenge = `Bearer realm="local-whatsapp"`
+)
+
 type eventMCPResult struct {
 	mcp.ResultBase
 	Raw json.RawMessage
@@ -84,13 +91,9 @@ func addMCPEvents(s *mcp.Server, c *localClient) {
 }
 
 func readMCPToken(path string) (string, error) {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0077 != 0 || fi.Size() > 1024 {
-		return "", errors.New("token file must be a private regular file (mode 0600)")
-	}
-	b, err := os.ReadFile(path)
+	b, err := readPrivateFile(path, 1024)
 	if err != nil {
-		return "", errors.New("could not read MCP token file")
+		return "", fmt.Errorf("read MCP token: %w", err)
 	}
 	token := strings.TrimSpace(string(b))
 	if len(token) < 32 || strings.ContainsAny(token, " \t\r\n") {
@@ -103,8 +106,13 @@ func initMCPToken(dir string) error {
 	if err := privateDir(dir); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "mcp-http.token")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	path := filepath.Join(dir, mcpTokenFilename)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(key[:])
+	err := writePrivateFile(path, []byte(encoded+"\n"), false)
 	if errors.Is(err, os.ErrExist) {
 		if _, err = readMCPToken(path); err != nil {
 			return err
@@ -115,20 +123,6 @@ func initMCPToken(dir string) error {
 	if err != nil {
 		return err
 	}
-	var key [32]byte
-	if _, err = rand.Read(key[:]); err != nil {
-		f.Close()
-		os.Remove(path)
-		return err
-	}
-	_, err = f.WriteString(base64.RawURLEncoding.EncodeToString(key[:]) + "\n")
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
 	fmt.Println("Created private MCP token file:", path)
 	return nil
 }
@@ -138,7 +132,7 @@ func authenticatedMCP(c *localClient, token string) http.Handler {
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path != "/mcp" {
+		if r.URL.Path != mcpHTTPPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -148,7 +142,7 @@ func authenticatedMCP(c *localClient, token string) http.Handler {
 		}
 		auth := r.Header.Get("Authorization")
 		if subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+token)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="local-whatsapp"`)
+			w.Header().Set("WWW-Authenticate", mcpAuthChallenge)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -157,14 +151,21 @@ func authenticatedMCP(c *localClient, token string) http.Handler {
 	})
 }
 
-func listenMCPHTTP(address string) (net.Listener, error) {
+func validateMCPListen(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return nil, errors.New("listen address must be an explicit loopback IP and port")
+		return errors.New("listen address must be an explicit loopback IP and port")
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil || !ip.IsLoopback() {
-		return nil, errors.New("HTTP MCP must bind to loopback; use an authenticated HTTPS proxy for remote access")
+		return errors.New("HTTP MCP must bind to loopback; use an authenticated HTTPS proxy for remote access")
+	}
+	return nil
+}
+
+func listenMCPHTTP(address string) (net.Listener, error) {
+	if err := validateMCPListen(address); err != nil {
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", address)
 	if errors.Is(err, syscall.EADDRINUSE) {
@@ -193,6 +194,6 @@ func serveMCPHTTP(ctx context.Context, dir string, l net.Listener, token string)
 	c := newLocalClient(dir)
 	defer c.http.CloseIdleConnections()
 	s := &http.Server{Handler: authenticatedMCP(c, token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: mediaRequestTimeout + 10*time.Second, IdleTimeout: 60 * time.Second}
-	fmt.Fprintln(os.Stderr, "Authenticated MCP HTTP endpoint:", "http://"+l.Addr().String()+"/mcp")
+	fmt.Fprintln(os.Stderr, "Authenticated MCP HTTP endpoint:", "http://"+l.Addr().String()+mcpHTTPPath)
 	return serveHTTP(ctx, s, l)
 }

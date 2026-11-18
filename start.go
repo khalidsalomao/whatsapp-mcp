@@ -7,13 +7,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
-// start owns the HTTP listener and any service it starts. An already running
-// service keeps its own lifecycle, including when this command is stopped.
-func runStart(ctx context.Context, dir, address, tokenPath string) error {
+func runStart(ctx context.Context, dir, address, tokenPath string, localOnly bool) error {
+	var config *tunnelConfig
+	var cloudflared string
+	if !localOnly {
+		var err error
+		config, err = readTunnelConfig(dir)
+		if err != nil {
+			return err
+		}
+		if config != nil {
+			cloudflared, err = cloudflaredPath()
+			if err != nil {
+				return err
+			}
+		}
+	}
 	listener, err := listenMCPHTTP(address)
 	if err != nil {
 		return err
@@ -23,7 +35,7 @@ func runStart(ctx context.Context, dir, address, tokenPath string) error {
 		if err := initMCPToken(dir); err != nil {
 			return err
 		}
-		tokenPath = filepath.Join(dir, "mcp-http.token")
+		tokenPath = filepath.Join(dir, mcpTokenFilename)
 	} else {
 		fmt.Fprintln(os.Stderr, "Authentication token file:", tokenPath)
 	}
@@ -31,36 +43,18 @@ func runStart(ctx context.Context, dir, address, tokenPath string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	// Keep the owned service alive until HTTP requests have drained on shutdown.
-	serviceCtx, stopService := context.WithCancel(context.WithoutCancel(ctx))
-	var workers sync.WaitGroup
-	defer func() {
-		cancel()
-		stopService()
-		workers.Wait()
-	}()
-	c := newLocalClient(dir)
-	defer c.http.CloseIdleConnections()
-	serviceDone := make(chan error, 1)
-	current, err := readServiceStatus(ctx, c)
+	service, err := acquireService(ctx, dir)
 	if err != nil {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			serviceDone <- runService(serviceCtx, dir)
-		}()
-		current, err = waitForService(ctx, c, serviceDone)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+		if ctx.Err() != nil {
+			return nil
 		}
-		fmt.Fprintln(os.Stderr, "Ctrl+C stops WhatsApp and this MCP endpoint.")
-	} else {
-		fmt.Fprintln(os.Stderr, "Using the running WhatsApp service. Ctrl+C stops this MCP endpoint.")
+		return err
 	}
+	defer service.stop()
+	if service.done == nil {
+		fmt.Fprintln(os.Stderr, "Using the running WhatsApp service.")
+	}
+	current := service.current
 	switch {
 	case current.AccountMismatch:
 		fmt.Fprintln(os.Stderr, "WhatsApp account mismatch. Use a separate --data-dir for this account.")
@@ -73,29 +67,80 @@ func runStart(ctx context.Context, dir, address, tokenPath string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "To pair WhatsApp, run in another terminal:\n  %s pair --open --data-dir %s\n", shellQuote(executable), shellQuote(dir))
+		fmt.Fprintf(os.Stderr, "To pair WhatsApp, run in another terminal:\n  %s setup --pair --data-dir %s\n", shellQuote(executable), shellQuote(dir))
 	}
 	fmt.Fprintln(os.Stderr, "Set the Authorization header to Bearer <contents of the token file>.")
+	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop the components started by this command.")
+
+	// Shutdown in reverse order: tunnel, HTTP, and then the owned WhatsApp
+	// service. That keeps the backend available while accepted requests drain.
+	httpCtx, stopHTTP := context.WithCancel(context.WithoutCancel(ctx))
 	httpDone := make(chan error, 1)
-	workers.Add(1)
 	go func() {
-		defer workers.Done()
-		httpDone <- serveMCPHTTP(ctx, dir, listener, token)
+		defer close(httpDone)
+		httpDone <- serveMCPHTTP(httpCtx, dir, listener, token)
 	}()
+	defer func() { stopHTTP(); <-httpDone }()
+
+	var tunnelDone <-chan error
+	if config != nil {
+		tunnelCtx, stopTunnel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			defer close(done)
+			done <- runTunnel(tunnelCtx, cloudflared, config, token)
+		}()
+		tunnelDone = done
+		defer func() { stopTunnel(); <-done }()
+	}
 	select {
 	case <-ctx.Done():
-		return <-httpDone
+		return nil
+	case err := <-tunnelDone:
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
 	case err := <-httpDone:
 		return err
-	case err := <-serviceDone:
-		if ctx.Err() != nil {
-			return <-httpDone
-		}
+	case err := <-service.done:
 		if err != nil {
 			return err
 		}
 		return errors.New("WhatsApp service stopped")
 	}
+}
+
+type runningService struct {
+	current status
+	done    <-chan error
+	stop    func()
+}
+
+// Use an existing service if available. The caller explicitly releases any
+// newly started service after its clients are done with it.
+func acquireService(ctx context.Context, dir string) (runningService, error) {
+	client := newLocalClient(dir)
+	defer client.http.CloseIdleConnections()
+	if current, err := readServiceStatus(ctx, client); err == nil {
+		return runningService{current: current, stop: func() {}}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return runningService{}, err
+	}
+	serviceCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		done <- runService(serviceCtx, dir)
+	}()
+	release := func() { stop(); <-done }
+	current, err := waitForService(ctx, client, done)
+	if err != nil {
+		release()
+		return runningService{}, err
+	}
+	return runningService{current: current, done: done, stop: release}, nil
 }
 
 func shellQuote(value string) string {

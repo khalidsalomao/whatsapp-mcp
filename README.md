@@ -22,32 +22,68 @@ make build
 ```
 
 One service owns the WhatsApp connection and SQLite databases. Independent MCP
-stdio clients share it over a private Unix socket. Optional `mcp-http` mode
-provides an authenticated loopback MCP endpoint. The `start` command starts both
-the service and HTTP endpoint and prints the local URL. The server does not
-require a model API key or run model inference. A host that invokes a model
-manages that separately.
+stdio clients share it over a private Unix socket. The `start` command starts the
+service and its authenticated loopback MCP endpoint. It can also run a configured
+Cloudflare Tunnel for a remote client. A host supplies its own model inference.
 
 ## Run locally
 
-Run the compiled executable from your project directory:
+After building, run the compiled executable from the project directory:
 
 ```sh
+./bin/whatsapp-mcp setup
 ./bin/whatsapp-mcp start
 ```
 
-It creates or reuses the private HTTP token, starts the WhatsApp service if
-needed, and prints `http://127.0.0.1:8765/mcp` once the local service is available.
-Use `Authorization: Bearer <token>` with the token from the printed file path.
-The command stays in the foreground. `Ctrl+C` stops the HTTP endpoint and a
-service started by this command. A service that was already running retains its
-own lifecycle. Shutdown allows active HTTP requests up to five seconds to finish.
+`setup` offers WhatsApp pairing and tunnel configuration independently. For
+pairing, it opens the QR code on macOS and prints the image path for manual
+opening. Scan it from WhatsApp under **Linked Devices → Link a Device**. Run
+`setup --pair` to do just this step. An existing saved session is reused.
 
-The saved WhatsApp pairing is reused on restart. For first-time pairing, use
-the complete command printed by `start` in another terminal. This command
-includes the data directory used by the running service. `start` accepts `--data-dir`,
-`--listen`, and an optional existing `--token-file`. A remote client needs a
-reachable HTTPS route to this local endpoint.
+`start` prints `http://127.0.0.1:8765/mcp` and uses the same private MCP token
+across restarts. The service also processes MCP Events subscriptions and
+deliveries. Press `Ctrl+C` to stop the components started by this command after
+giving active requests time to finish. Already running WhatsApp services have
+their own lifecycle.
+
+`./bin/whatsapp-mcp status` shows the WhatsApp connection and individual
+checks under `local_mcp` and `tunnel` in its JSON output. When using a custom
+`--data-dir`, `--listen` or `--token-file`, pass the same option to `status`.
+
+### Connect Grok Bot at a fixed HTTPS URL
+
+1. Install `cloudflared`. On macOS, run `brew install cloudflared`. In your
+   Cloudflare account, create a dedicated named tunnel and a published route on
+   a domain managed by Cloudflare. Set the service URL to
+   `http://127.0.0.1:8765` and the **HTTP Host Header** to `127.0.0.1:8765`.
+   Use the same address as `start --listen` if you customize it. Quick Tunnel
+   hostnames change on restart.
+   [Cloudflare setup](https://developers.cloudflare.com/tunnel/get-started/)
+   · [Origin settings](https://developers.cloudflare.com/tunnel/reference/origin-parameters/#httphostheader)
+2. Run `./bin/whatsapp-mcp setup`. Enter the published HTTPS URL and only the
+   token value that follows `--token` in the Cloudflare dashboard command.
+   Setup adds `/mcp` to a hostname-only URL and stores the settings privately
+   in the selected data directory. It can copy the MCP header to the clipboard
+   on macOS with your permission. For scripts, use
+   `setup --tunnel-url URL --tunnel-token-file PATH` with a private file
+   containing the Cloudflare connector token.
+3. Run `./bin/whatsapp-mcp start` and wait for **Cloudflare HTTPS endpoint**.
+   In **Connect apps → Add a custom connector**, use **Remote HTTPS**, the
+   printed URL, and the `Authorization` header with value `Bearer <MCP token>`.
+   Use the token from `mcp-http.token` or the value copied by setup. Leave
+   **Client ID** empty. Ask the Bot to call `get_status`.
+   [Grok Bot connector setup](https://docs.x.ai/grok-bot/computer-and-apps#connect-an-app)
+
+Restart `start` and call `get_status` again from the same connector. The hostname
+and MCP token are reused. The hostname is public and the MCP bearer token
+authorizes its tools, including WhatsApp sends. Keep both tokens private. If the
+published route fails verification, check the Cloudflare settings and run
+`start` again. `start --local` runs without the tunnel for that session, and
+`setup --remove-tunnel` removes the saved configuration for future starts.
+
+The HTTPS connector lets Grok Bot call tools on demand. For event-driven use,
+an agent host needs to subscribe to MCP Events and handle verified callbacks.
+A Grok routine uses its own webhook trigger.
 
 ## Tools
 
@@ -251,7 +287,7 @@ requirement for the event-driven workflow.
 its placeholder paths and adapt the wrapper to the chosen MCP client. The
 `call --tool NAME` CLI adapter exposes the same tools for local development,
 with a single JSON object on stdin. Neither example installs a client or starts
-a model. Pairing/logout remain separate CLI commands.
+a model. Use the CLI to pair or log out.
 
 ## Monitor a conversation with MCP Events
 
@@ -293,7 +329,8 @@ HTTPS route to the MCP endpoint for discovery, subscriptions, and tool calls.
 The local daemon then delivers signed outbound HTTPS callbacks. No public
 endpoint or live subscription is created by the default installer.
 
-The `start` command prepares the local HTTP endpoint automatically. To manage
+The `start` command prepares the local HTTP endpoint automatically. For a stable
+remote URL, see [Connect Grok Bot at a fixed HTTPS URL](#connect-grok-bot-at-a-fixed-https-url). To manage
 that endpoint separately from an existing service:
 
 ```sh
@@ -396,11 +433,10 @@ Only the last command requires the Codex CLI or modifies its configuration.
 Existing unrelated entries are preserved. Re-running an installation retains
 the account databases. Build/test commands never invoke the installer.
 
-To run from the project directory on macOS, start `./bin/whatsapp-mcp start`.
-The `serve` command runs the WhatsApp service on its own for stdio clients.
-For first-time pairing, run `./bin/whatsapp-mcp pair --open` in a second terminal
-or double-click `Pair WhatsApp.command` in the project folder. Scan the QR with
-WhatsApp → Linked Devices → Link a Device. The service keeps the linked session
+Use [setup and start](#run-locally) to run from the project directory. The
+`serve` command runs the WhatsApp service on its own for stdio clients.
+`pair --open` and the `Pair WhatsApp.command` launcher can still pair against
+an existing service. The service keeps the linked session
 in `~/Library/Application Support/WhatsAppMCP`. To use a custom data directory,
 pass the same `--data-dir` to the service, pairing and MCP commands.
 Later client registration can use, for example:
@@ -409,9 +445,9 @@ Later client registration can use, for example:
 codex mcp add whatsapp -- /absolute/path/whatsapp-mcp mcp --data-dir /absolute/private/directory
 ```
 
-Commands `pair`, `logout`, and `status` use the private socket. Pairing/logout are
-never exposed as MCP tools. MCP discovery still works with the service offline,
-and tool calls return an actionable connection error.
+Commands `pair` and `logout` use the private socket, and `status` also checks
+the HTTP MCP endpoints. MCP discovery works with the service offline, and tool
+calls return a connection error.
 
 ## Service management
 
