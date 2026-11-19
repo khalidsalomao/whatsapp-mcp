@@ -29,6 +29,8 @@ Device** in WhatsApp. Skip tunnel setup for a client on the same Mac.
 `start` brings up the WhatsApp service, MCP Events, local HTTP, and any
 configured tunnel. Run `./bin/whatsapp-mcp status` to check the connection.
 
+![Example terminal session. Setup pairs WhatsApp and skips the tunnel, then start prints http://127.0.0.1:8765/mcp](docs/quick-start.gif)
+
 ## Connect a client
 
 | Client | Connection |
