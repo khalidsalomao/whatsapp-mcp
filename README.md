@@ -1,8 +1,14 @@
 # WhatsApp MCP
 
-Connect Codex, Grok Bot, or another MCP client to WhatsApp on your Mac. Search
-chats, send text and attachments, react to messages, and handle new-message
-events.
+Search WhatsApp chats, send text and attachments, and react to messages from
+Codex, Grok Bot, or another MCP client. The service runs on your Mac as a
+WhatsApp linked device and supports MCP Events for new messages.
+
+**[whatsmeow](https://github.com/tulir/whatsmeow)** powers WhatsApp pairing and
+messaging. It's a Go library by Tulir Asokan and contributors.
+
+[Quick start](#quick-start) · [Connect a client](#connect-a-client) ·
+[MCP tools](#mcp-tools) · [Conversation monitoring](#monitor-a-conversation)
 
 ## Quick start
 
@@ -20,11 +26,16 @@ make build
 In `setup`, choose pairing and scan the QR code from **Linked Devices → Link a
 Device** in WhatsApp. Skip tunnel setup for a client on the same Mac.
 
-`start` runs the WhatsApp service, MCP Events delivery, the local HTTP endpoint,
-and any configured tunnel. It prints the local URL
-(`http://127.0.0.1:8765/mcp` by default) and the path to `mcp-http.token`.
-Set the client's `Authorization` header to `Bearer <contents of mcp-http.token>`.
-Run `./bin/whatsapp-mcp status` to check the connection.
+`start` brings up the WhatsApp service, MCP Events, local HTTP, and any
+configured tunnel. Run `./bin/whatsapp-mcp status` to check the connection.
+
+## Connect a client
+
+| Client | Connection |
+| --- | --- |
+| Codex or another stdio client on your Mac | [stdio](#connect-codex-over-stdio) |
+| An HTTP client on your Mac | [Local HTTP](#local-http) |
+| Grok Bot or another remote client | [Remote HTTPS](#connect-grok-bot-over-https) |
 
 ### Connect Codex over stdio
 
@@ -36,7 +47,12 @@ codex mcp add whatsapp -- "$PWD/bin/whatsapp-mcp" mcp
 
 For other stdio clients, adapt the [example config](mcp-client-config.example.json).
 
-## Connect Grok Bot over HTTPS
+### Local HTTP
+
+Use `http://127.0.0.1:8765/mcp` by default. Set the `Authorization` header to
+`Bearer <MCP token>` using the contents of the token file printed by `start`.
+
+### Connect Grok Bot over HTTPS
 
 1. Install `cloudflared` with `brew install cloudflared`. Create a named
    Cloudflare Tunnel and publish a hostname. Set the service URL to
@@ -48,17 +64,24 @@ For other stdio clients, adapt the [example config](mcp-client-config.example.js
    published HTTPS URL and the connector token shown after `--token` in
    Cloudflare. For scripts, pass `--tunnel-url URL --tunnel-token-file PATH`
    with a private token file outside the checkout.
-3. Stop any running `start` with `Ctrl+C`. Run `./bin/whatsapp-mcp start` and
-   copy the printed **Cloudflare HTTPS endpoint**. In Grok Bot, open
-   **Connect apps → Add a custom connector** and
-   choose **Remote HTTPS**. Paste the URL, set `Authorization` to
-   `Bearer <contents of mcp-http.token>`, and leave **Client ID** empty.
-   Call `get_status` to check the connection.
-   [Grok Bot connector guide](https://docs.x.ai/grok-bot/computer-and-apps#connect-an-app)
+3. Stop any running `start` with `Ctrl+C`, then run `./bin/whatsapp-mcp start`
+   to bring up the tunnel.
 
-The URL and MCP token are reused on restart. The MCP token grants read and send
-access to the linked account. Keep both tokens and the data directory out of Git,
-and use example hostnames in shared configs.
+In Grok Bot, open **Connect apps → Add a custom connector**.
+
+| Field | Value |
+| --- | --- |
+| Type | **Remote HTTPS** |
+| Server URL | **Cloudflare HTTPS endpoint** printed by `start` |
+| HTTP headers | `Authorization` with value `Bearer <MCP token>` from `mcp-http.token` |
+| Client ID | Leave blank |
+
+Call `get_status` to check the connection. The URL and MCP token are reused on
+restart. [Grok Bot connector guide](https://docs.x.ai/grok-bot/computer-and-apps#connect-an-app)
+
+> [!IMPORTANT]
+> The MCP token grants read and send access to the linked account. Keep both
+> tokens and the data directory out of Git. Use example hostnames in shared configs.
 
 Use `start --local` to skip the tunnel for one run or `setup --remove-tunnel` to
 remove its settings.
