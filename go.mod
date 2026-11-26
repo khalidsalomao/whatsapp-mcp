@@ -1,4 +1,4 @@
-module local/whatsapp-mcp
+module github.com/khalidsalomao/whatsapp-mcp
 
 go 1.27.4
 

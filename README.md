@@ -5,7 +5,9 @@ Codex, Grok Bot, or another MCP client. The service runs on your Mac as a
 WhatsApp linked device and supports MCP Events for new messages.
 
 **[whatsmeow](https://github.com/tulir/whatsmeow)** powers WhatsApp pairing and
-messaging. It's a Go library by Tulir Asokan and contributors.
+messaging. It's a Go library by Tulir Asokan and contributors. This project is
+unofficial and not affiliated with WhatsApp; automated messaging carries a risk
+of account restriction under WhatsApp's terms.
 
 [Quick start](#quick-start) · [Connect a client](#connect-a-client) ·
 [MCP tools](#mcp-tools) · [Conversation monitoring](#monitor-a-conversation)
